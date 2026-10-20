@@ -3,5 +3,5 @@
 # Forge two command line arguments that
 # make the application to leak the password that is
 # stored internally.
-hello 5
+hello 16
 # end
